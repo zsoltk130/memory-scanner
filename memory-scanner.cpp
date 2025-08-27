@@ -106,14 +106,14 @@ int main()
 
     // Search for integer value
     int searchValue;
-    std::cout << "Enter initial value to search for (int) > ";
+    std::cout << "Enter initial value to search (int) > ";
     std::cin >> searchValue;
 
     auto matches = InitialScan(hProcess, searchValue);
     std::cout << "Initial scan found " << matches.size() << " matches." << std::endl;
     
     while (true) {
-        std::cout << "[d]isplay matches; [w]rite to address; [r]escan; [q]uit > ";
+        std::cout << "[d]isplay matches; [w]rite to address; [r]e scan; [n]ew scan; [q]uit > ";
         char selection;
         std::cin >> selection;
 
@@ -124,10 +124,10 @@ int main()
             PrintMatches(hProcess, matches);
             
             int choice;
-            std::cout << "Enter number of address to modify >";
+            std::cout << "Enter number of address to modify > ";
             std::cin >> choice;
             int newVal;
-            std::cout << "Enter new value >";
+            std::cout << "Enter new value > ";
             std::cin >> newVal;
             
             WriteToAddress(hProcess, (LPVOID)matches[choice].address, newVal);
@@ -141,6 +141,14 @@ int main()
 
             matches = Rescan(hProcess, matches, newValue);
             std::cout << "Rescan narrowed down to " << matches.size() << " matches." << std::endl;
+        }
+        else if (selection == 'n')
+        {
+            std::cout << "Enter initial value to search (int) > ";
+            std::cin >> searchValue;
+
+            auto matches = InitialScan(hProcess, searchValue);
+            std::cout << "Initial scan found " << matches.size() << " matches." << std::endl;
         }
         else if (selection == 'q') { break; }
     }
