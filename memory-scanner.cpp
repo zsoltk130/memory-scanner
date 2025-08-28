@@ -1,23 +1,185 @@
+#define NOMINMAX
+
 #include <iostream>
 #include <vector>
 #include <windows.h>
 #include <iomanip>
 #include <string>
 #include <psapi.h>
+#include <thread>
+#include <future>
+#include <algorithm>
+#include <immintrin.h>
 
 struct Candidate {
     uintptr_t address;
 };
 
-
-struct MemRegion {
+struct MemoryRegion {
     uintptr_t baseAddress;
-    SIZE_T size;
+    size_t size;
 };
 
+// SIMD-optimized search for 4-byte integers
+std::vector<size_t> FindValueSIMD(const char* buffer, size_t size, int searchValue) {
+    std::vector<size_t> positions;
+
+    // Create SIMD register with 8 copies of search value (256-bit AVX2)
+    __m256i search_vec = _mm256_set1_epi32(searchValue);
+
+    size_t simd_end = (size - sizeof(int)) & ~31; // Align to 32-byte boundary
+
+    // SIMD loop - process 8 integers at once
+    for (size_t i = 0; i < simd_end; i += 32) {
+        __m256i data = _mm256_loadu_si256((__m256i*)(buffer + i));
+        __m256i cmp = _mm256_cmpeq_epi32(data, search_vec);
+        int mask = _mm256_movemask_epi8(cmp);
+
+        if (mask != 0) {
+            // Check each 4-byte position in this 32-byte chunk
+            for (int j = 0; j < 8; j++) {
+                if (mask & (0xF << (j * 4))) {
+                    int* val = (int*)(buffer + i + j * 4);
+                    if (*val == searchValue) {
+                        positions.push_back(i + j * 4);
+                    }
+                }
+            }
+        }
+    }
+
+    // Handle remaining bytes with scalar code
+    for (size_t i = simd_end; i < size - sizeof(int); i++) {
+        int* val = (int*)(buffer + i);
+        if (*val == searchValue) {
+            positions.push_back(i);
+        }
+    }
+
+    return positions;
+}
+
+// Worker function for multithreaded scanning
+std::vector<Candidate> ScanRegion(HANDLE hProcess, const MemoryRegion& region, int searchValue) {
+    std::vector<Candidate> matches;
+
+    // Skip regions too small to contain an int
+    if (region.size < sizeof(int)) return matches;
+
+    const size_t BUFFER_SIZE = 1024 * 1024; // 1MB
+    // Use aligned allocation for potential SIMD benefit
+    char* buffer = (char*)_aligned_malloc(BUFFER_SIZE, 32);
+    if (!buffer) return matches;
+
+    for (size_t offset = 0; offset < region.size; offset += BUFFER_SIZE) {
+        size_t readSize = std::min(BUFFER_SIZE, region.size - offset);
+        SIZE_T bytesRead = 0;
+
+        if (ReadProcessMemory(hProcess,
+            (LPCVOID)(region.baseAddress + offset),
+            buffer, readSize, &bytesRead)) {
+
+            // Use SIMD-optimized search
+            auto positions = FindValueSIMD(buffer, bytesRead, searchValue);
+
+            for (size_t pos : positions) {
+                matches.push_back({ region.baseAddress + offset + pos });
+            }
+        }
+    }
+
+    _aligned_free(buffer);
+    return matches;
+}
+
+// Filter memory regions to scan only relevant ones
+std::vector<MemoryRegion> FilterMemoryRegions(HANDLE hProcess) {
+    std::vector<MemoryRegion> regions;
+    MEMORY_BASIC_INFORMATION mbi;
+    uintptr_t address = 0;
+
+    while (VirtualQueryEx(hProcess, (LPCVOID)address, &mbi, sizeof(mbi))) {
+        // Only scan committed, readable/writable memory
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) &&
+            !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+
+            // Skip very small regions (likely not game data)
+            if (mbi.RegionSize >= 4096) {
+                regions.push_back({
+                    (uintptr_t)mbi.BaseAddress,
+                    mbi.RegionSize
+                    });
+            }
+        }
+
+        address = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    }
+
+    return regions;
+}
+
+// Main optimized scanning function
+std::vector<Candidate> InitialScanOptimized(HANDLE hProcess, int searchValue) {
+    std::vector<Candidate> allMatches;
+
+    // Get filtered memory regions
+    auto regions = FilterMemoryRegions(hProcess);
+
+    // Determine optimal thread count (usually CPU cores - 1)
+    unsigned int threadCount = std::max(1u, std::thread::hardware_concurrency() - 1);
+
+    // For very large memory spaces, use multithreading
+    if (regions.size() > 10) {
+        std::vector<std::future<std::vector<Candidate>>> futures;
+
+        // Divide regions among threads
+        size_t regionsPerThread = (regions.size() + threadCount - 1) / threadCount;
+
+        for (unsigned int t = 0; t < threadCount; t++) {
+            size_t startIdx = t * regionsPerThread;
+            size_t endIdx = std::min(startIdx + regionsPerThread, regions.size());
+
+            if (startIdx < endIdx) {
+                futures.push_back(std::async(std::launch::async, [&, startIdx, endIdx]() {
+                    std::vector<Candidate> threadMatches;
+
+                    for (size_t i = startIdx; i < endIdx; i++) {
+                        auto regionMatches = ScanRegion(hProcess, regions[i], searchValue);
+                        threadMatches.insert(threadMatches.end(),
+                            regionMatches.begin(),
+                            regionMatches.end());
+                    }
+
+                    return threadMatches;
+                }));
+            }
+        }
+
+        // Collect results from all threads
+        for (auto& future : futures) {
+            auto threadMatches = future.get();
+            allMatches.insert(allMatches.end(),
+                threadMatches.begin(),
+                threadMatches.end());
+        }
+    }
+    else {
+        // For smaller memory spaces, use single-threaded approach
+        for (const auto& region : regions) {
+            auto regionMatches = ScanRegion(hProcess, region, searchValue);
+            allMatches.insert(allMatches.end(),
+                regionMatches.begin(),
+                regionMatches.end());
+        }
+    }
+
+    return allMatches;
+}
+
 // Function to get all readable memory regions
-std::vector<MemRegion> GetMemoryRegions(HANDLE hProcess) {
-    std::vector<MemRegion> regions;
+std::vector<MemoryRegion> GetMemoryRegions(HANDLE hProcess) {
+    std::vector<MemoryRegion> regions;
     MEMORY_BASIC_INFORMATION mbi;
     uintptr_t address = 0;
 
@@ -31,19 +193,26 @@ std::vector<MemRegion> GetMemoryRegions(HANDLE hProcess) {
     return regions;
 }
 
-// First scan through all memory
 std::vector<Candidate> InitialScan(HANDLE hProcess, int searchValue) {
     std::vector<Candidate> matches;
     auto regions = GetMemoryRegions(hProcess);
 
     for (auto& region : regions) {
+        // Skip regions too small to contain an int
+        if (region.size < sizeof(int)) continue;
+
         std::vector<char> buffer(region.size);
-        SIZE_T bytesRead;
+        SIZE_T bytesRead = 0;
         if (ReadProcessMemory(hProcess, (LPCVOID)region.baseAddress,
             buffer.data(), buffer.size(), &bytesRead)) {
-            for (size_t i = 0; i < bytesRead - sizeof(int); i++) {
-                int* val = (int*)&buffer[i];
-                if (*val == searchValue) {
+            // Use pointer arithmetic for faster scanning
+            const char* data = buffer.data();
+            size_t maxOffset = bytesRead - sizeof(int) + 1;
+            for (size_t i = 0; i < maxOffset; ++i) {
+                // Use memcpy to avoid unaligned access
+                int val;
+                memcpy(&val, data + i, sizeof(int));
+                if (val == searchValue) {
                     matches.push_back({ region.baseAddress + i });
                 }
             }
@@ -169,7 +338,7 @@ int main()
             std::cout << "Enter initial value to search (int) > ";
             std::cin >> searchValue;
 
-            auto matches = InitialScan(hProcess, searchValue);
+            matches = InitialScanOptimized(hProcess, searchValue);
             std::cout << "Initial scan found " << matches.size() << " matches." << std::endl;
         }
         else if (selection == 'm')
