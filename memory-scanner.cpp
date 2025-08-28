@@ -2,6 +2,8 @@
 #include <vector>
 #include <windows.h>
 #include <iomanip>
+#include <string>
+#include <psapi.h>
 
 struct Candidate {
     uintptr_t address;
@@ -81,6 +83,7 @@ void PrintMatches(HANDLE hProcess, const std::vector<Candidate>& matches) {
     std::cout << "--------------------------------------\n";
 }
 
+// Helper function to write a new value to a specific address
 void WriteToAddress(HANDLE hProcess, LPVOID address, int newValue) {
     SIZE_T bytesWritten;
     if (WriteProcessMemory(hProcess, address, &newValue, sizeof(newValue), &bytesWritten)) {
@@ -91,6 +94,15 @@ void WriteToAddress(HANDLE hProcess, LPVOID address, int newValue) {
     }
 }
 
+// Helper function to get process name from handle
+std::string GetProcessName(HANDLE hProcess) {
+    char name[MAX_PATH] = "<unknown>";
+    if (GetModuleBaseNameA(hProcess, NULL, name, sizeof(name) / sizeof(char))) {
+        return std::string(name);
+    }
+    return "<unknown>";
+}
+
 int main()
 {
     // Open desired process by specifying it's PID
@@ -98,29 +110,35 @@ int main()
     std::cout << "Enter PID of application to memory scan > ";
     std::cin >> pid;
 
-    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid);
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid);
     if (!hProcess) {
         std::cerr << "Failed to open process. Error: " << GetLastError() << std::endl;
         return 1;
     }
-
-    // Search for integer value
-    int searchValue;
-    std::cout << "Enter initial value to search (int) > ";
-    std::cin >> searchValue;
-
-    auto matches = InitialScan(hProcess, searchValue);
-    std::cout << "Initial scan found " << matches.size() << " matches." << std::endl;
+    
+    std::vector<Candidate> matches;
+	int searchValue = 0;
     
     while (true) {
-        std::cout << "[d]isplay matches; [w]rite to address; [r]e scan; [n]ew scan; [q]uit > ";
+        std::string procName = GetProcessName(hProcess);
+
+        std::cout << "Attached to process: " << procName << "\n";
+        std::cout << "[d]isplay matches; [w]rite to address; [r]e scan; [n]ew scan ; [m]anual address access; [q]uit > ";
         char selection;
         std::cin >> selection;
 
         if (selection == 'd') {
+            if (matches.empty()) {
+                std::cout << "No matches to display. Perform a scan first." << std::endl;
+                continue;
+			}
             PrintMatches(hProcess, matches);
         }
         else if (selection == 'w') {
+            if (matches.empty()) {
+                std::cout << "No matches to write to. Perform a scan first." << std::endl;
+                continue;
+			}
             PrintMatches(hProcess, matches);
             
             int choice;
@@ -135,6 +153,10 @@ int main()
         }
         else if (selection == 'r')
         {
+            if (matches.empty()) {
+                std::cout << "No previous matches to rescan. Perform an initial scan first." << std::endl;
+                continue;
+            }
             int newValue;
             std::cout << "Enter new value: ";
             std::cin >> newValue;
@@ -149,6 +171,59 @@ int main()
 
             auto matches = InitialScan(hProcess, searchValue);
             std::cout << "Initial scan found " << matches.size() << " matches." << std::endl;
+        }
+        else if (selection == 'm')
+        {
+            uintptr_t manualAddress = 0;
+            int manualValue = 0;
+
+            while (true) {
+                // Read value at manualAddress if set
+                if (manualAddress != 0) {
+                    SIZE_T bytesRead;
+                    int tempValue = 0;
+                    if (ReadProcessMemory(hProcess, (LPCVOID)manualAddress, &tempValue, sizeof(tempValue), &bytesRead)) {
+                        manualValue = tempValue;
+                    } else {
+                        manualValue = 0;
+                    }
+                }
+
+                std::cout << "--------------------------------------\n";
+                std::cout << "Current address: 0x" << std::hex << manualAddress << std::dec << "\n"
+                          << " Current value: " << manualValue << "\n";
+                std::cout << "input [a]ddress; input [v]alue; [b]ack > ";
+                char msel;
+                std::cin >> msel;
+
+                if (msel == 'a') {
+                    std::cout << "Enter address (hex, e.g. 12345678): 0x";
+                    std::string addrStr;
+                    std::cin >> addrStr;
+                    try {
+                        manualAddress = std::stoull(addrStr, nullptr, 16);
+                    } catch (...) {
+                        std::cout << "Invalid address format.\n";
+                        manualAddress = 0;
+                    }
+                } else if (msel == 'v') {
+                    if (manualAddress == 0) {
+                        std::cout << "Set an address first.\n";
+                        continue;
+                    }
+                    std::cout << "Enter new value (int): ";
+                    int newVal;
+                    std::cin >> newVal;
+                    SIZE_T bytesWritten;
+                    if (WriteProcessMemory(hProcess, (LPVOID)manualAddress, &newVal, sizeof(newVal), &bytesWritten)) {
+                        std::cout << "Value updated successfully!\n";
+                    } else {
+                        std::cerr << "Failed to write memory. Error: " << GetLastError() << std::endl;
+                    }
+                } else if (msel == 'b') {
+                    break;
+                }
+            }
         }
         else if (selection == 'q') { break; }
     }
