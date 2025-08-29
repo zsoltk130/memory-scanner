@@ -296,6 +296,25 @@ void ListProcesses() {
     CloseHandle(hSnapshot);
 }
 
+//// Alternative: Pattern-based search for common game values
+//std::vector<Candidate> SearchGamePatterns(HANDLE hProcess, int searchValue) {
+//    std::vector<Candidate> matches;
+//
+//    // Common UE5 memory patterns - adjust base addresses as needed
+//    std::vector<std::pair<uintptr_t, size_t>> commonRanges = {
+//        {0x140000000, 0x10000000}, // Common game module range
+//        {0x7FF000000000, 0x1000000000}, // User-mode address space
+//    };
+//
+//    for (auto& range : commonRanges) {
+//        MemoryRegion region = { range.first, range.second };
+//        auto regionMatches = ScanRegion(hProcess, region, searchValue);
+//        matches.insert(matches.end(), regionMatches.begin(), regionMatches.end());
+//    }
+//
+//    return matches;
+//}
+
 int main()
 {
     std::vector<Candidate> matches;
