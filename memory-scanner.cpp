@@ -6,10 +6,7 @@
 #include <iomanip>
 #include <string>
 #include <psapi.h>
-#include <thread>
 #include <future>
-#include <algorithm>
-#include <immintrin.h>
 #include <tlhelp32.h>
 
 struct Candidate {
@@ -194,33 +191,34 @@ std::vector<MemoryRegion> GetMemoryRegions(HANDLE hProcess) {
     return regions;
 }
 
-std::vector<Candidate> InitialScan(HANDLE hProcess, int searchValue) {
-    std::vector<Candidate> matches;
-    auto regions = GetMemoryRegions(hProcess);
-
-    for (auto& region : regions) {
-        // Skip regions too small to contain an int
-        if (region.size < sizeof(int)) continue;
-
-        std::vector<char> buffer(region.size);
-        SIZE_T bytesRead = 0;
-        if (ReadProcessMemory(hProcess, (LPCVOID)region.baseAddress,
-            buffer.data(), buffer.size(), &bytesRead)) {
-            // Use pointer arithmetic for faster scanning
-            const char* data = buffer.data();
-            size_t maxOffset = bytesRead - sizeof(int) + 1;
-            for (size_t i = 0; i < maxOffset; ++i) {
-                // Use memcpy to avoid unaligned access
-                int val;
-                memcpy(&val, data + i, sizeof(int));
-                if (val == searchValue) {
-                    matches.push_back({ region.baseAddress + i });
-                }
-            }
-        }
-    }
-    return matches;
-}
+// OLD InitialScan without optimizations
+//std::vector<Candidate> InitialScan(HANDLE hProcess, int searchValue) {
+//    std::vector<Candidate> matches;
+//    auto regions = GetMemoryRegions(hProcess);
+//
+//    for (auto& region : regions) {
+//        // Skip regions too small to contain an int
+//        if (region.size < sizeof(int)) continue;
+//
+//        std::vector<char> buffer(region.size);
+//        SIZE_T bytesRead = 0;
+//        if (ReadProcessMemory(hProcess, (LPCVOID)region.baseAddress,
+//            buffer.data(), buffer.size(), &bytesRead)) {
+//            // Use pointer arithmetic for faster scanning
+//            const char* data = buffer.data();
+//            size_t maxOffset = bytesRead - sizeof(int) + 1;
+//            for (size_t i = 0; i < maxOffset; ++i) {
+//                // Use memcpy to avoid unaligned access
+//                int val;
+//                memcpy(&val, data + i, sizeof(int));
+//                if (val == searchValue) {
+//                    matches.push_back({ region.baseAddress + i });
+//                }
+//            }
+//        }
+//    }
+//    return matches;
+//}
 
 // Rescan only known candidate addresses
 std::vector<Candidate> Rescan(HANDLE hProcess, const std::vector<Candidate>& oldMatches, int newValue) {
@@ -322,9 +320,9 @@ int main()
         else if (selection == 'f') {
             ListProcesses();
 
-            std::cout << "Enter PID of application to memory scan > ";
+            std::cout << "Enter PID of application to memory scan, or [c]ancel > ";
             std::cin >> pid;
-            CloseHandle(hProcess);
+			if (pid == 'c' || pid == 'C') { continue; }
             hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid);
             if (!hProcess) {
                 std::cerr << "Failed to open process. Error: " << GetLastError() << std::endl;
