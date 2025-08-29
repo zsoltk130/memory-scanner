@@ -10,6 +10,7 @@
 #include <future>
 #include <algorithm>
 #include <immintrin.h>
+#include <tlhelp32.h>
 
 struct Candidate {
     uintptr_t address;
@@ -272,27 +273,42 @@ std::string GetProcessName(HANDLE hProcess) {
     return "<unknown>";
 }
 
+// Lists all running processes with their names and PIDs
+void ListProcesses() {
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) {
+        std::cerr << "Failed to create process snapshot.\n";
+        return;
+    }
+
+    PROCESSENTRY32 pe;
+    pe.dwSize = sizeof(PROCESSENTRY32);
+
+    if (Process32First(hSnapshot, &pe)) {
+        std::cout << "PID\tProcess Name\n";
+        std::cout << "-----------------------------\n";
+        do {
+            std::wcout << pe.th32ProcessID << "\t" << pe.szExeFile << "\n";
+        } while (Process32Next(hSnapshot, &pe));
+    }
+    else {
+        std::cerr << "Failed to enumerate processes.\n";
+    }
+
+    CloseHandle(hSnapshot);
+}
+
 int main()
 {
-    // Open desired process by specifying it's PID
-    DWORD pid;
-    std::cout << "Enter PID of application to memory scan > ";
-    std::cin >> pid;
-
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid);
-    if (!hProcess) {
-        std::cerr << "Failed to open process. Error: " << GetLastError() << std::endl;
-        return 1;
-    }
-    
     std::vector<Candidate> matches;
 	int searchValue = 0;
+    HANDLE hProcess = NULL;
+    DWORD pid = 0;
+    std::string procName = "NULL";
     
     while (true) {
-        std::string procName = GetProcessName(hProcess);
-
         std::cout << "Attached to process: " << procName << "\n";
-        std::cout << "[d]isplay matches; [w]rite to address; [r]e scan; [n]ew scan ; [m]anual address access; [q]uit > ";
+        std::cout << "[d]isplay matches; [f]ind processes; [w]rite to address; [r]e scan; [n]ew scan ; [m]anual address access; [q]uit > ";
         char selection;
         std::cin >> selection;
 
@@ -303,6 +319,20 @@ int main()
 			}
             PrintMatches(hProcess, matches);
         }
+        else if (selection == 'f') {
+            ListProcesses();
+
+            std::cout << "Enter PID of application to memory scan > ";
+            std::cin >> pid;
+            CloseHandle(hProcess);
+            hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid);
+            if (!hProcess) {
+                std::cerr << "Failed to open process. Error: " << GetLastError() << std::endl;
+                return 1;
+            }
+			procName = GetProcessName(hProcess);
+            matches.clear();
+		}
         else if (selection == 'w') {
             if (matches.empty()) {
                 std::cout << "No matches to write to. Perform a scan first." << std::endl;
@@ -335,6 +365,10 @@ int main()
         }
         else if (selection == 'n')
         {
+            if (!hProcess) {
+                std::cout << "No process attached. Find a process first." << std::endl;
+                continue;
+			}
             std::cout << "Enter initial value to search (int) > ";
             std::cin >> searchValue;
 
@@ -343,6 +377,11 @@ int main()
         }
         else if (selection == 'm')
         {
+            if (!hProcess) {
+                std::cout << "No process attached. Find a process first." << std::endl;
+                continue;
+            }
+
             uintptr_t manualAddress = 0;
             int manualValue = 0;
 
@@ -397,6 +436,9 @@ int main()
         else if (selection == 'q') { break; }
     }
     
-    CloseHandle(hProcess);
+    if (hProcess)
+    {
+        CloseHandle(hProcess);
+    }
     return 0;
 }
